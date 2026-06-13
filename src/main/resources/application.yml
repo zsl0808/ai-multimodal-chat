@@ -1,0 +1,27 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: ai-conversation
+
+# Gemini API Configuration
+gemini:
+  api-key: ${GEMINI_API_KEY:your-api-key-here}
+  model: gemini-2.0-flash
+  base-url: https://generativelanguage.googleapis.com/v1beta
+  max-output-tokens: 300
+  temperature: 0.7
+
+# Cost Control Settings
+cost-control:
+  # Max conversation rounds to keep in context
+  max-context-rounds: 10
+  # JPEG quality for video frames (0.0 - 1.0)
+  frame-jpeg-quality: 0.6
+  # Max frame width in pixels
+  frame-max-width: 640
+  # Frame capture interval in ms (when scene changes detected)
+  frame-interval-ms: 3000
+  # Minimum frame capture interval in ms (even if scene unchanged)
+  frame-min-interval-ms: 5000
