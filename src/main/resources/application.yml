@@ -5,11 +5,11 @@ spring:
   application:
     name: ai-conversation
 
-# Gemini API Configuration
-gemini:
-  api-key: ${GEMINI_API_KEY:your-api-key-here}
-  model: gemini-2.0-flash
-  base-url: https://generativelanguage.googleapis.com/v1beta
+# Qwen VL API Configuration (通义千问视觉语言模型)
+qwen:
+  api-key: ${DASHSCOPE_API_KEY:your-api-key-here}
+  model: qwen-vl-max
+  base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
   max-output-tokens: 300
   temperature: 0.7
 

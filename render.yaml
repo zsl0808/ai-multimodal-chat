@@ -1,9 +1,7 @@
 services:
   - type: web
     name: ai-conversation
-    runtime: java
-    buildCommand: ./mvnw clean package -DskipTests
-    startCommand: java -jar target/conversation-1.0.0.jar
+    runtime: docker
     envVars:
-      - key: GEMINI_API_KEY
+      - key: DASHSCOPE_API_KEY
         sync: false

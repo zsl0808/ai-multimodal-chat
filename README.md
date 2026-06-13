@@ -8,7 +8,7 @@
 - 🎤 **语音对话** — 使用浏览器内置语音识别，与 AI 自然对话
 - ⌨️ **文字输入** — 支持传统的文字聊天方式
 - 🔍 **多模态融合** — 摄像头开启时，AI 自动结合画面和文字进行回复
-- 💰 **成本优化** — 多项成本控制策略，10 分钟对话仅需约 1-2 美分
+- 💰 **成本优化** — 多项成本控制策略，国内直连无需翻墙
 
 ## 🏗️ 技术栈
 
@@ -16,22 +16,22 @@
 |---|---|
 | 后端 | Java 17 + Spring Boot 3.2 |
 | 实时通信 | WebSocket |
-| AI API | Google Gemini 2.0 Flash |
+| AI API | 通义千问 VL (阿里 DashScope) |
 | 语音识别 | Web Speech API (浏览器内置) |
 | 语音合成 | SpeechSynthesis API (浏览器内置) |
 | 前端 | 原生 HTML + CSS + JavaScript |
 
 ## 🚀 快速开始
 
-### 1. 获取 Gemini API Key
+### 1. 获取 DashScope API Key
 
-访问 [Google AI Studio](https://aistudio.google.com/app/apikey) 免费获取 API Key。
+访问 [阿里云 DashScope](https://dashscope.console.aliyun.com/apiKey) 获取 API Key。
 
 ### 2. 配置 API Key
 
 ```bash
 # 方式一: 环境变量 (推荐)
-export GEMINI_API_KEY=your-api-key-here
+export DASHSCOPE_API_KEY=your-api-key-here
 
 # 方式二: 直接修改 src/main/resources/application.yml
 ```
@@ -57,9 +57,9 @@ java -jar target/conversation-1.0.0.jar
 2. 访问 [render.com](https://render.com) 注册/登录
 3. **New** → **Web Service** → 连接你的 GitHub 仓库
 4. Render 会自动检测 `render.yaml` 并配置
-5. 在 Environment 中设置 `GEMINI_API_KEY` 环境变量
+5. 在 Environment 中设置 `DASHSCOPE_API_KEY` 环境变量
 6. 点击 **Create Web Service** 部署
-7. 部署完成后获得公网地址，如 `https://ai-conversation.onrender.com`
+7. 部署完成后获得公网地址
 
 > ⚠️ Render 免费版在无请求时会休眠，首次访问需等待约 30 秒唤醒。
 
@@ -75,13 +75,11 @@ java -jar target/conversation-1.0.0.jar
 
 本应用采用了多项成本优化策略：
 
-- 使用最便宜的 Gemini 2.0 Flash 模型
+- 使用通义千问 VL 模型（国内直连，性价比高）
 - 自适应帧率：静止画面不重复发送
 - JPEG 压缩：640px 宽度，质量 0.6
 - 浏览器内置语音识别和合成（免费）
 - 限制 AI 回复长度和上下文窗口
-
-> 10 分钟对话成本约 **$0.01 - $0.02**
 
 ## 📁 项目结构
 

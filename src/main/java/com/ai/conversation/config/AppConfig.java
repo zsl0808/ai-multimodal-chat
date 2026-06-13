@@ -6,19 +6,19 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class AppConfig {
 
-    @Value("${gemini.api-key}")
-    private String geminiApiKey;
+    @Value("${qwen.api-key}")
+    private String qwenApiKey;
 
-    @Value("${gemini.model}")
-    private String geminiModel;
+    @Value("${qwen.model}")
+    private String qwenModel;
 
-    @Value("${gemini.base-url}")
-    private String geminiBaseUrl;
+    @Value("${qwen.base-url}")
+    private String qwenBaseUrl;
 
-    @Value("${gemini.max-output-tokens}")
+    @Value("${qwen.max-output-tokens}")
     private int maxOutputTokens;
 
-    @Value("${gemini.temperature}")
+    @Value("${qwen.temperature}")
     private double temperature;
 
     @Value("${cost-control.max-context-rounds}")
@@ -31,9 +31,9 @@ public class AppConfig {
     private int frameMaxWidth;
 
     // Getters
-    public String getGeminiApiKey() { return geminiApiKey; }
-    public String getGeminiModel() { return geminiModel; }
-    public String getGeminiBaseUrl() { return geminiBaseUrl; }
+    public String getQwenApiKey() { return qwenApiKey; }
+    public String getQwenModel() { return qwenModel; }
+    public String getQwenBaseUrl() { return qwenBaseUrl; }
     public int getMaxOutputTokens() { return maxOutputTokens; }
     public double getTemperature() { return temperature; }
     public int getMaxContextRounds() { return maxContextRounds; }

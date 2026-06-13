@@ -18,10 +18,15 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Gemini AI 服务 - 负责调用 Google Gemini API 处理多模态请求
+ * AI 服务 - 负责调用通义千问 VL API 处理多模态请求
+ *
+ * 使用 DashScope OpenAI 兼容模式:
+ * - 端点: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+ * - 模型: qwen-vl-max (视觉语言大模型)
+ * - 认证: Bearer Token
  *
  * 成本控制策略:
- * 1. 使用最便宜的 gemini-2.0-flash 模型
+ * 1. 使用 qwen-vl-max 模型（性价比高）
  * 2. 限制输出 token 数量 (maxOutputTokens)
  * 3. 只保留最近 N 轮对话上下文
  * 4. 图像使用 JPEG 压缩 (质量由前端控制)
@@ -35,7 +40,6 @@ public class GeminiAIService {
     private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
 
-    // System prompt that instructs the AI how to behave
     private static final String SYSTEM_PROMPT =
             "你是一个友好的 AI 助手，能够通过摄像头看到用户的画面，通过语音与用户交流。" +
             "请用简洁、自然的中文回复。如果用户发送了图像，请描述你看到的内容。" +
@@ -52,78 +56,72 @@ public class GeminiAIService {
     }
 
     /**
-     * 发送文字消息给 Gemini API
+     * 发送文字消息
      */
     public String chat(ConversationSession session, String userMessage) {
-        // 记录用户消息
         session.addMessage(ChatMessage.userText(userMessage));
 
         try {
-            String requestBody = buildTextRequest(session, userMessage);
-            String response = callGeminiApi(requestBody);
-
-            // 记录 AI 回复
+            String requestBody = buildTextRequest(session);
+            String response = callQwenApi(requestBody);
             session.addMessage(ChatMessage.assistantText(response));
             return response;
         } catch (Exception e) {
-            log.error("Gemini API call failed", e);
+            log.error("Qwen API call failed", e);
             return "抱歉，AI 服务暂时不可用，请稍后再试。错误: " + e.getMessage();
         }
     }
 
     /**
-     * 发送图像 + 文字给 Gemini API (多模态)
+     * 发送图像 + 文字 (多模态)
      */
     public String chatWithImage(ConversationSession session, String userMessage, byte[] imageData) {
-        // 记录用户消息 (图像不存入历史，只存文字描述)
         session.addMessage(ChatMessage.userText(userMessage + " [附带摄像头画面]"));
 
         try {
             String requestBody = buildMultimodalRequest(session, userMessage, imageData);
-            String response = callGeminiApi(requestBody);
-
+            String response = callQwenApi(requestBody);
             session.addMessage(ChatMessage.assistantText(response));
             return response;
         } catch (Exception e) {
-            log.error("Gemini multimodal API call failed", e);
+            log.error("Qwen multimodal API call failed", e);
             return "抱歉，图像分析服务暂时不可用。错误: " + e.getMessage();
         }
     }
 
     /**
-     * 分析图像 (无文字提问，纯画面描述)
+     * 分析图像 (纯画面描述)
      */
     public String analyzeImage(ConversationSession session, byte[] imageData) {
         return chatWithImage(session, "请简要描述你在这张图像中看到的内容。", imageData);
     }
 
     /**
-     * 构建纯文字请求体
+     * 构建纯文字请求体 (OpenAI 兼容格式)
      */
-    private String buildTextRequest(ConversationSession session, String userMessage) {
+    private String buildTextRequest(ConversationSession session) {
         try {
             ObjectNode root = objectMapper.createObjectNode();
+            root.put("model", appConfig.getQwenModel());
 
-            // System instruction
-            ObjectNode systemInstruction = root.putObject("systemInstruction");
-            ArrayNode systemParts = systemInstruction.putArray("parts");
-            systemParts.addObject().put("text", SYSTEM_PROMPT);
+            // Messages
+            ArrayNode messages = root.putArray("messages");
 
-            // Contents (conversation history)
-            ArrayNode contents = root.putArray("contents");
+            // System message
+            ObjectNode sysMsg = messages.addObject();
+            sysMsg.put("role", "system");
+            sysMsg.put("content", SYSTEM_PROMPT);
+
+            // Conversation history
             List<ChatMessage> recentHistory = session.getRecentHistory(appConfig.getMaxContextRounds());
-
             for (ChatMessage msg : recentHistory) {
-                ObjectNode content = contents.addObject();
-                content.put("role", msg.getRole() == ChatMessage.Role.USER ? "user" : "model");
-                ArrayNode parts = content.putArray("parts");
-                parts.addObject().put("text", msg.getContent());
+                ObjectNode chatMsg = messages.addObject();
+                chatMsg.put("role", msg.getRole() == ChatMessage.Role.USER ? "user" : "assistant");
+                chatMsg.put("content", msg.getContent());
             }
 
-            // Generation config
-            ObjectNode genConfig = root.putObject("generationConfig");
-            genConfig.put("maxOutputTokens", appConfig.getMaxOutputTokens());
-            genConfig.put("temperature", appConfig.getTemperature());
+            root.put("max_tokens", appConfig.getMaxOutputTokens());
+            root.put("temperature", appConfig.getTemperature());
 
             return objectMapper.writeValueAsString(root);
         } catch (Exception e) {
@@ -137,46 +135,44 @@ public class GeminiAIService {
     private String buildMultimodalRequest(ConversationSession session, String userMessage, byte[] imageData) {
         try {
             ObjectNode root = objectMapper.createObjectNode();
+            root.put("model", appConfig.getQwenModel());
 
-            // System instruction
-            ObjectNode systemInstruction = root.putObject("systemInstruction");
-            ArrayNode systemParts = systemInstruction.putArray("parts");
-            systemParts.addObject().put("text", SYSTEM_PROMPT);
+            ArrayNode messages = root.putArray("messages");
 
-            // Contents
-            ArrayNode contents = root.putArray("contents");
+            // System message
+            ObjectNode sysMsg = messages.addObject();
+            sysMsg.put("role", "system");
+            sysMsg.put("content", SYSTEM_PROMPT);
 
-            // Add conversation history (text only, to save tokens)
+            // Conversation history (text only)
             List<ChatMessage> recentHistory = session.getRecentHistory(appConfig.getMaxContextRounds());
             for (ChatMessage msg : recentHistory) {
-                // Skip the last user message as we'll add it with the image
                 if (msg == recentHistory.get(recentHistory.size() - 1) && msg.getRole() == ChatMessage.Role.USER) {
                     continue;
                 }
-                ObjectNode content = contents.addObject();
-                content.put("role", msg.getRole() == ChatMessage.Role.USER ? "user" : "model");
-                ArrayNode parts = content.putArray("parts");
-                parts.addObject().put("text", msg.getContent());
+                ObjectNode chatMsg = messages.addObject();
+                chatMsg.put("role", msg.getRole() == ChatMessage.Role.USER ? "user" : "assistant");
+                chatMsg.put("content", msg.getContent());
             }
 
-            // Add current user message with image
-            ObjectNode userContent = contents.addObject();
-            userContent.put("role", "user");
-            ArrayNode userParts = userContent.putArray("parts");
+            // Current user message with image (OpenAI multimodal format)
+            ObjectNode userMsg = messages.addObject();
+            userMsg.put("role", "user");
+            ArrayNode contentArray = userMsg.putArray("content");
 
             // Text part
-            userParts.addObject().put("text", userMessage);
+            ObjectNode textPart = contentArray.addObject();
+            textPart.put("type", "text");
+            textPart.put("text", userMessage);
 
-            // Image part
-            ObjectNode imagePart = userParts.addObject();
-            ObjectNode inlineData = imagePart.putObject("inlineData");
-            inlineData.put("mimeType", "image/jpeg");
-            inlineData.put("data", Base64.getEncoder().encodeToString(imageData));
+            // Image part (base64)
+            ObjectNode imagePart = contentArray.addObject();
+            imagePart.put("type", "image_url");
+            ObjectNode imageUrl = imagePart.putObject("image_url");
+            imageUrl.put("url", "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(imageData));
 
-            // Generation config
-            ObjectNode genConfig = root.putObject("generationConfig");
-            genConfig.put("maxOutputTokens", appConfig.getMaxOutputTokens());
-            genConfig.put("temperature", appConfig.getTemperature());
+            root.put("max_tokens", appConfig.getMaxOutputTokens());
+            root.put("temperature", appConfig.getTemperature());
 
             return objectMapper.writeValueAsString(root);
         } catch (Exception e) {
@@ -185,27 +181,26 @@ public class GeminiAIService {
     }
 
     /**
-     * 调用 Gemini REST API
+     * 调用通义千问 API (OpenAI 兼容模式)
      */
-    private String callGeminiApi(String requestBody) throws IOException {
-        String url = String.format("%s/models/%s:generateContent?key=%s",
-                appConfig.getGeminiBaseUrl(),
-                appConfig.getGeminiModel(),
-                appConfig.getGeminiApiKey());
+    private String callQwenApi(String requestBody) throws IOException {
+        String url = appConfig.getQwenBaseUrl() + "/chat/completions";
 
         Request request = new Request.Builder()
                 .url(url)
+                .addHeader("Authorization", "Bearer " + appConfig.getQwenApiKey())
+                .addHeader("Content-Type", "application/json")
                 .post(RequestBody.create(requestBody, MediaType.parse("application/json")))
                 .build();
 
-        log.debug("Calling Gemini API: {}", url.replace(appConfig.getGeminiApiKey(), "***"));
+        log.debug("Calling Qwen API: {}", url);
 
         try (Response response = httpClient.newCall(request).execute()) {
             String body = response.body() != null ? response.body().string() : "";
 
             if (!response.isSuccessful()) {
-                log.error("Gemini API error: {} - {}", response.code(), body);
-                throw new IOException("Gemini API returned " + response.code() + ": " + body);
+                log.error("Qwen API error: {} - {}", response.code(), body);
+                throw new IOException("Qwen API returned " + response.code() + ": " + body);
             }
 
             return extractResponseText(body);
@@ -213,31 +208,23 @@ public class GeminiAIService {
     }
 
     /**
-     * 从 Gemini API 响应中提取文本
+     * 从 OpenAI 兼容响应中提取文本
      */
     private String extractResponseText(String responseBody) throws IOException {
         JsonNode root = objectMapper.readTree(responseBody);
 
-        JsonNode candidates = root.get("candidates");
-        if (candidates != null && candidates.isArray() && !candidates.isEmpty()) {
-            JsonNode content = candidates.get(0).get("content");
-            if (content != null) {
-                JsonNode parts = content.get("parts");
-                if (parts != null && parts.isArray() && !parts.isEmpty()) {
-                    StringBuilder sb = new StringBuilder();
-                    for (JsonNode part : parts) {
-                        JsonNode text = part.get("text");
-                        if (text != null) {
-                            sb.append(text.asText());
-                        }
-                    }
-                    return sb.toString();
+        JsonNode choices = root.get("choices");
+        if (choices != null && choices.isArray() && !choices.isEmpty()) {
+            JsonNode message = choices.get(0).get("message");
+            if (message != null) {
+                JsonNode content = message.get("content");
+                if (content != null) {
+                    return content.asText();
                 }
             }
         }
 
-        // Fallback: try to extract any text from the response
-        log.warn("Unexpected Gemini response structure: {}", responseBody);
+        log.warn("Unexpected response structure: {}", responseBody);
         return "AI 未能生成有效回复，请重试。";
     }
 }
