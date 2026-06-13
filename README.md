@@ -51,6 +51,18 @@ java -jar target/conversation-1.0.0.jar
 
 访问 **http://localhost:8080** (推荐使用 Chrome 浏览器)
 
+## ☁️ 部署到 Render (免费公网地址)
+
+1. 将代码推送到 GitHub
+2. 访问 [render.com](https://render.com) 注册/登录
+3. **New** → **Web Service** → 连接你的 GitHub 仓库
+4. Render 会自动检测 `render.yaml` 并配置
+5. 在 Environment 中设置 `GEMINI_API_KEY` 环境变量
+6. 点击 **Create Web Service** 部署
+7. 部署完成后获得公网地址，如 `https://ai-conversation.onrender.com`
+
+> ⚠️ Render 免费版在无请求时会休眠，首次访问需等待约 30 秒唤醒。
+
 ## 📖 使用说明
 
 1. **开启摄像头** — 点击"开启摄像头"按钮，AI 就能看到你的画面

@@ -31,8 +31,8 @@ out/
 *.swp
 *~
 
-# Maven wrapper
-.mvn/wrapper/maven-wrapper.jar
+# Maven wrapper (included for deployment)
+# .mvn/wrapper/maven-wrapper.jar
 
 # OS files
 .DS_Store
