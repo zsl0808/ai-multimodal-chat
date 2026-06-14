@@ -291,12 +291,81 @@ const Speech = (() => {
     }
 
     /**
+     * 将 WebM/Opus 音频 Blob 转换为 WAV 格式（16kHz, 16-bit, mono）
+     * DashScope Paraformer 需要 WAV/PCM 格式
+     */
+    async function convertToWav(webmBlob) {
+        try {
+            const audioContext = new AudioContext({ sampleRate: 16000 });
+            const arrayBuffer = await webmBlob.arrayBuffer();
+            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            console.log('[Speech] Decoded audio:', audioBuffer.sampleRate + 'Hz', audioBuffer.numberOfChannels + 'ch', audioBuffer.duration + 's');
+
+            // 取第一声道，转 Int16
+            const channelData = audioBuffer.getChannelData(0);
+            const int16Data = new Int16Array(channelData.length);
+            for (let i = 0; i < channelData.length; i++) {
+                const s = Math.max(-1, Math.min(1, channelData[i]));
+                int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+
+            // 构建 WAV 文件
+            const numChannels = 1;
+            const sampleRate = audioBuffer.sampleRate;
+            const bitsPerSample = 16;
+            const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+            const blockAlign = numChannels * bitsPerSample / 8;
+            const dataSize = int16Data.length * 2;
+
+            const buffer = new ArrayBuffer(44 + dataSize);
+            const view = new DataView(buffer);
+
+            function writeStr(offset, str) {
+                for (let i = 0; i < str.length; i++) {
+                    view.setUint8(offset + i, str.charCodeAt(i));
+                }
+            }
+
+            writeStr(0, 'RIFF');
+            view.setUint32(4, 36 + dataSize, true);
+            writeStr(8, 'WAVE');
+            writeStr(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);        // PCM
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, byteRate, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, bitsPerSample, true);
+            writeStr(36, 'data');
+            view.setUint32(40, dataSize, true);
+
+            new Uint8Array(buffer, 44).set(new Uint8Array(int16Data.buffer));
+
+            audioContext.close();
+            return new Blob([buffer], { type: 'audio/wav' });
+        } catch (e) {
+            console.error('[Speech] Failed to convert audio:', e);
+            return null;
+        }
+    }
+
+    /**
      * 发送音频到后端进行识别（降级方案）
      */
     async function sendAudioForRecognition(audioBlob) {
         try {
+            // 将 WebM 转成 WAV（DashScope Paraformer 需要）
+            console.log('[Speech] Converting WebM to WAV...');
+            const wavBlob = await convertToWav(audioBlob);
+            if (!wavBlob) {
+                console.warn('[Speech] Audio conversion failed, skipping');
+                return;
+            }
+            console.log('[Speech] WAV size:', wavBlob.size, 'bytes');
+
             const formData = new FormData();
-            formData.append('audio', audioBlob, 'recording.webm');
+            formData.append('audio', wavBlob, 'recording.wav');
 
             const response = await fetch('/api/speech/recognize', {
                 method: 'POST',
@@ -310,6 +379,7 @@ const Speech = (() => {
             const result = await response.json();
 
             if (result.text && result.text.trim()) {
+                console.log('[Speech] Recognized:', result.text);
                 onResult(result.text.trim());
             }
             if (result.error) {

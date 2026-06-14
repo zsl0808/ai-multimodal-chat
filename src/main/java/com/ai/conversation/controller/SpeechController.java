@@ -124,8 +124,13 @@ public class SpeechController {
         if (!resource.exists()) {
             return ResponseEntity.notFound().build();
         }
+        // 根据扩展名设置 Content-Type
+        String contentType = "audio/webm";
+        if (filename.endsWith(".wav")) {
+            contentType = "audio/wav";
+        }
         return ResponseEntity.ok()
-                .contentType(MediaType.parseMediaType("audio/webm"))
+                .contentType(MediaType.parseMediaType(contentType))
                 .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + filename + "\"")
                 .body(resource);
     }
