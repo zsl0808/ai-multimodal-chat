@@ -1,17 +1,18 @@
 /**
  * 语音模块
- * 使用浏览器 MediaRecorder 录制 + 后端语音识别
- *
- * 优势: 在任何网络环境下都能工作，不依赖 Google 服务
+ * 优先使用浏览器 SpeechRecognition API (Web Speech API)
+ * 降级使用 MediaRecorder 录制 + 后端语音识别
  */
 const Speech = (() => {
-    let mediaRecorder = null;
+    let recognition = null;       // Web Speech API
+    let mediaRecorder = null;     // 降级方案: MediaRecorder
     let audioChunks = [];
     let synthesis = window.speechSynthesis;
     let isListening = false;
     let isSpeaking = false;
-    let shouldContinueListening = false;  // 持续监听意图标记
+    let shouldContinueListening = false;
     let recordingTimer = null;
+    let useBrowserAPI = false;    // 是否使用浏览器内置 API
 
     // 回调函数
     let onResult = null;
@@ -19,24 +20,22 @@ const Speech = (() => {
     let onStart = null;
     let onEnd = null;
     let onError = null;
-    let onStateChange = null;  // 状态变化回调（通知 app.js 更新按钮）
+    let onStateChange = null;
 
     /**
      * 检查浏览器支持
      */
     function isSupported() {
-        return navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
+        // 优先检查 Web Speech API
+        const hasSpeechRecognition = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+        const hasMediaRecorder = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+        return hasSpeechRecognition || hasMediaRecorder;
     }
 
     /**
      * 初始化语音识别
      */
     function init(callbacks = {}) {
-        if (!isSupported()) {
-            console.warn('[Speech] MediaRecorder not supported in this browser');
-            return false;
-        }
-
         onResult = callbacks.onResult || (() => {});
         onInterim = callbacks.onInterim || (() => {});
         onStart = callbacks.onStart || (() => {});
@@ -44,7 +43,86 @@ const Speech = (() => {
         onError = callbacks.onError || (() => {});
         onStateChange = callbacks.onStateChange || (() => {});
 
-        return true;
+        // 优先使用浏览器内置 SpeechRecognition
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRecognition) {
+            recognition = new SpeechRecognition();
+            recognition.lang = 'zh-CN';
+            recognition.interimResults = true;
+            recognition.continuous = true;
+            recognition.maxAlternatives = 1;
+
+            recognition.onresult = (event) => {
+                let interim = '';
+                let final = '';
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const result = event.results[i];
+                    if (result.isFinal) {
+                        final += result[0].transcript;
+                    } else {
+                        interim += result[0].transcript;
+                    }
+                }
+                if (final) {
+                    console.log('[Speech] Final:', final);
+                    onResult(final);
+                }
+                if (interim) {
+                    console.log('[Speech] Interim:', interim);
+                    onInterim(interim);
+                }
+            };
+
+            recognition.onstart = () => {
+                console.log('[Speech] Browser recognition started');
+                isListening = true;
+                onStart();
+                onStateChange(true);
+            };
+
+            recognition.onend = () => {
+                console.log('[Speech] Browser recognition ended');
+                isListening = false;
+                onEnd();
+
+                // 自动重启（持续监听）
+                if (shouldContinueListening) {
+                    console.log('[Speech] Auto-restarting browser recognition...');
+                    setTimeout(() => {
+                        if (shouldContinueListening) {
+                            try { recognition.start(); } catch (e) { /* ignore */ }
+                        }
+                    }, 100);
+                } else {
+                    onStateChange(false);
+                }
+            };
+
+            recognition.onerror = (event) => {
+                console.error('[Speech] Browser recognition error:', event.error, event.message);
+                if (event.error === 'not-allowed') {
+                    isListening = false;
+                    shouldContinueListening = false;
+                    onStateChange(false);
+                    onError('not-allowed');
+                }
+                // 其他错误（no-speech, aborted 等）自动在 onend 中处理
+            };
+
+            useBrowserAPI = true;
+            console.log('[Speech] Using browser SpeechRecognition API');
+            return true;
+        }
+
+        // 降级: 检查 MediaRecorder 支持
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            useBrowserAPI = false;
+            console.log('[Speech] Browser SpeechRecognition not available, using MediaRecorder fallback');
+            return true;
+        }
+
+        console.warn('[Speech] Neither SpeechRecognition nor MediaRecorder supported');
+        return false;
     }
 
     /**
@@ -56,15 +134,42 @@ const Speech = (() => {
             return true;
         }
 
+        if (useBrowserAPI && recognition) {
+            return startBrowserRecognition();
+        } else {
+            return startMediaRecorder();
+        }
+    }
+
+    /**
+     * 浏览器内置 SpeechRecognition
+     */
+    function startBrowserRecognition() {
+        try {
+            shouldContinueListening = true;
+            recognition.start();
+            return true;
+        } catch (e) {
+            console.error('[Speech] Failed to start browser recognition:', e);
+            shouldContinueListening = false;
+            onStateChange(false);
+            onError(e.message);
+            return false;
+        }
+    }
+
+    /**
+     * MediaRecorder 降级方案
+     */
+    async function startMediaRecorder() {
         try {
             console.log('[Speech] Requesting microphone permission...');
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            console.log('[Speech] Microphone granted, tracks:', stream.getAudioTracks().length);
+            console.log('[Speech] Microphone granted');
 
-            // 检查音频轨道状态
             const audioTrack = stream.getAudioTracks()[0];
             if (audioTrack) {
-                console.log('[Speech] Audio track:', audioTrack.label, 'readyState:', audioTrack.readyState);
+                console.log('[Speech] Audio track:', audioTrack.label);
                 audioTrack.onended = () => {
                     console.warn('[Speech] Audio track ended unexpectedly!');
                 };
@@ -88,13 +193,11 @@ const Speech = (() => {
 
             const recorderOptions = mimeType ? { mimeType } : {};
             mediaRecorder = new MediaRecorder(stream, recorderOptions);
-
             audioChunks = [];
             shouldContinueListening = true;
 
             mediaRecorder.ondataavailable = (event) => {
                 if (event.data.size > 0) {
-                    console.log('[Speech] Data chunk received:', event.data.size, 'bytes');
                     audioChunks.push(event.data);
                 }
             };
@@ -108,23 +211,22 @@ const Speech = (() => {
                     console.log('[Speech] Sending audio for recognition, size:', audioBlob.size);
                     await sendAudioForRecognition(audioBlob);
                 } else {
-                    console.log('[Speech] Audio too small, skipping recognition');
+                    console.log('[Speech] Audio too small, skipping');
                 }
 
                 isListening = false;
                 onEnd();
-                onStateChange(false);  // 通知 app.js 更新按钮
 
-                // 如果用户没有主动停止，自动重启录音（实现持续识别）
                 if (shouldContinueListening) {
-                    console.log('[Speech] Auto-restarting recording...');
+                    console.log('[Speech] Auto-restarting MediaRecorder...');
                     setTimeout(() => {
                         if (shouldContinueListening) {
-                            startListening();
+                            startMediaRecorder();
                         }
                     }, 100);
                 } else {
                     console.log('[Speech] User stopped, not restarting');
+                    onStateChange(false);
                 }
             };
 
@@ -132,7 +234,7 @@ const Speech = (() => {
                 console.error('[Speech] MediaRecorder error:', event.error);
                 isListening = false;
                 shouldContinueListening = false;
-                onStateChange(false);  // 通知 app.js 更新按钮
+                onStateChange(false);
                 onError(event.error);
             };
 
@@ -141,22 +243,22 @@ const Speech = (() => {
 
             isListening = true;
             onStart();
-            onStateChange(true);  // 通知 app.js 更新按钮
+            onStateChange(true);
             showInterimStatus();
 
             // 3秒后自动停止当前录音段，触发 onstop 后会自动重启
             recordingTimer = setTimeout(() => {
                 if (mediaRecorder && mediaRecorder.state === 'recording') {
-                    console.log('[Speech] 3s cycle timer: stopping recorder');
+                    console.log('[Speech] 3s cycle: stopping recorder');
                     mediaRecorder.stop();
                 }
             }, 3000);
 
             return true;
         } catch (e) {
-            console.error('[Speech] Failed to start:', e.name, e.message);
+            console.error('[Speech] Failed to start MediaRecorder:', e.name, e.message);
             shouldContinueListening = false;
-            onStateChange(false);  // 通知 app.js 更新按钮
+            onStateChange(false);
             onError(e.message);
             return false;
         }
@@ -167,7 +269,7 @@ const Speech = (() => {
      */
     function showInterimStatus() {
         if (isListening) {
-            onInterim('🎤 正在录音...');
+            onInterim('正在录音...');
             setTimeout(() => {
                 if (isListening) {
                     showInterimStatus();
@@ -177,7 +279,7 @@ const Speech = (() => {
     }
 
     /**
-     * 发送音频到后端进行识别
+     * 发送音频到后端进行识别（降级方案）
      */
     async function sendAudioForRecognition(audioBlob) {
         try {
@@ -198,9 +300,11 @@ const Speech = (() => {
             if (result.text && result.text.trim()) {
                 onResult(result.text.trim());
             }
+            if (result.error) {
+                console.warn('[Speech] Backend recognition error:', result.error);
+            }
         } catch (e) {
             console.error('[Speech] Recognition error:', e);
-            // 不中断，继续录音
         }
     }
 
@@ -208,11 +312,19 @@ const Speech = (() => {
      * 停止语音识别
      */
     function stopListening() {
-        shouldContinueListening = false;  // 标记为主动停止，onstop 中不再重启
+        shouldContinueListening = false;
 
         if (recordingTimer) {
             clearTimeout(recordingTimer);
             recordingTimer = null;
+        }
+
+        if (useBrowserAPI && recognition) {
+            try {
+                recognition.stop();
+            } catch (e) {
+                // recognition might already be stopped
+            }
         }
 
         if (mediaRecorder && mediaRecorder.state === 'recording') {
@@ -220,6 +332,7 @@ const Speech = (() => {
         }
 
         isListening = false;
+        onStateChange(false);
     }
 
     /**
@@ -236,7 +349,7 @@ const Speech = (() => {
     }
 
     /**
-     * 语音合成 (TTS) - 让 AI 说话
+     * 语音合成 (TTS)
      */
     function speak(text) {
         if (!synthesis) {
@@ -258,14 +371,8 @@ const Speech = (() => {
             utterance.voice = zhVoice;
         }
 
-        utterance.onstart = () => {
-            isSpeaking = true;
-        };
-
-        utterance.onend = () => {
-            isSpeaking = false;
-        };
-
+        utterance.onstart = () => { isSpeaking = true; };
+        utterance.onend = () => { isSpeaking = false; };
         utterance.onerror = (e) => {
             isSpeaking = false;
             console.error('[Speech] TTS error:', e);
@@ -274,9 +381,6 @@ const Speech = (() => {
         synthesis.speak(utterance);
     }
 
-    /**
-     * 停止语音播放
-     */
     function stopSpeaking() {
         if (synthesis) {
             synthesis.cancel();
@@ -284,9 +388,6 @@ const Speech = (() => {
         }
     }
 
-    /**
-     * 获取状态
-     */
     function getIsListening() { return isListening; }
     function getIsSpeaking() { return isSpeaking; }
 
