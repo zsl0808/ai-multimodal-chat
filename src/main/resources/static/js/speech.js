@@ -13,6 +13,7 @@ const Speech = (() => {
     let shouldContinueListening = false;
     let recordingTimer = null;
     let useBrowserAPI = false;    // 是否使用浏览器内置 API
+    let browserAPIFailed = false; // 浏览器 API 是否已失败（用于降级）
 
     // 回调函数
     let onResult = null;
@@ -83,17 +84,18 @@ const Speech = (() => {
             recognition.onend = () => {
                 console.log('[Speech] Browser recognition ended');
                 isListening = false;
-                onEnd();
 
-                // 自动重启（持续监听）
+                // 自动重启（持续监听）- 不隐藏状态避免跳动
                 if (shouldContinueListening) {
                     console.log('[Speech] Auto-restarting browser recognition...');
                     setTimeout(() => {
                         if (shouldContinueListening) {
                             try { recognition.start(); } catch (e) { /* ignore */ }
                         }
-                    }, 100);
+                    }, 150);
                 } else {
+                    // 用户主动停止才隐藏状态
+                    onEnd();
                     onStateChange(false);
                 }
             };
@@ -105,6 +107,16 @@ const Speech = (() => {
                     shouldContinueListening = false;
                     onStateChange(false);
                     onError('not-allowed');
+                } else if (event.error === 'network' || event.error === 'service-not-allowed') {
+                    // Google 语音服务不可用（国内被墙），降级到 MediaRecorder
+                    console.warn('[Speech] Browser API unavailable, falling back to MediaRecorder');
+                    isListening = false;
+                    shouldContinueListening = false;
+                    browserAPIFailed = true;
+                    useBrowserAPI = false;
+                    onStateChange(false);
+                    // 自动用 MediaRecorder 重试
+                    setTimeout(() => startMediaRecorder(), 300);
                 }
                 // 其他错误（no-speech, aborted 等）自动在 onend 中处理
             };
@@ -134,7 +146,7 @@ const Speech = (() => {
             return true;
         }
 
-        if (useBrowserAPI && recognition) {
+        if (useBrowserAPI && recognition && !browserAPIFailed) {
             return startBrowserRecognition();
         } else {
             return startMediaRecorder();

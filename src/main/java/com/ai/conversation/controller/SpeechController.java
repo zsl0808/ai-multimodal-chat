@@ -131,13 +131,14 @@ public class SpeechController {
     }
 
     /**
-     * 调用 DashScope 语音识别 API (Paraformer)
-     * 使用 file_urls 参数，传入公网可访问的音频 URL
+     * 调用 DashScope 语音识别 API (Paraformer) - 异步模式
+     * 1. 提交任务获取 task_id
+     * 2. 轮询等待结果
      */
-    private String callSpeechRecognition(String audioUrl) throws IOException {
-        String url = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription";
+    private String callSpeechRecognition(String audioUrl) throws IOException, InterruptedException {
+        String apiUrl = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription";
 
-        // 构建请求体 - 正确格式
+        // 构建请求体
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", "paraformer-v1");
 
@@ -155,25 +156,71 @@ public class SpeechController {
         okhttp3.RequestBody requestBodyObj = okhttp3.RequestBody.create(
                 jsonBody, okhttp3.MediaType.parse("application/json"));
 
-        Request request = new Request.Builder()
-                .url(url)
+        // 1. 提交异步任务
+        Request submitRequest = new Request.Builder()
+                .url(apiUrl)
                 .addHeader("Authorization", "Bearer " + appConfig.getQwenApiKey())
                 .addHeader("Content-Type", "application/json")
-                .addHeader("X-DashScope-OSSResourceResolve", "enable")  // 允许下载非 OSS URL
+                .addHeader("X-DashScope-Async", "enable")
+                .addHeader("X-DashScope-OSSResourceResolve", "enable")
                 .post(requestBodyObj)
                 .build();
 
-        try (Response response = httpClient.newCall(request).execute()) {
+        String taskId;
+        try (Response response = httpClient.newCall(submitRequest).execute()) {
             String responseBody = response.body() != null ? response.body().string() : "";
-            log.info("ASR response [{}]: {}", response.code(), responseBody);
+            log.info("ASR submit response [{}]: {}", response.code(), responseBody);
 
             if (!response.isSuccessful()) {
-                log.error("Speech recognition API error: {} - {}", response.code(), responseBody);
-                throw new IOException("Speech recognition failed: " + response.code());
+                throw new IOException("Speech recognition submit failed: " + response.code() + " - " + responseBody);
             }
 
-            return extractRecognizedText(responseBody);
+            JsonNode root = objectMapper.readTree(responseBody);
+            JsonNode output = root.get("output");
+            if (output == null || output.get("task_id") == null) {
+                // 可能是同步调用直接返回结果
+                return extractRecognizedText(responseBody);
+            }
+            taskId = output.get("task_id").asText();
+            log.info("ASR task submitted: {}", taskId);
         }
+
+        // 2. 轮询任务结果
+        String taskUrl = "https://dashscope.aliyuncs.com/api/v1/tasks/" + taskId;
+        for (int i = 0; i < 30; i++) {  // 最多等30秒
+            Thread.sleep(1000);
+
+            Request pollRequest = new Request.Builder()
+                    .url(taskUrl)
+                    .addHeader("Authorization", "Bearer " + appConfig.getQwenApiKey())
+                    .get()
+                    .build();
+
+            try (Response response = httpClient.newCall(pollRequest).execute()) {
+                String responseBody = response.body() != null ? response.body().string() : "";
+                log.info("ASR poll [{}] [{}]: {}", i, response.code(),
+                        responseBody.length() > 200 ? responseBody.substring(0, 200) + "..." : responseBody);
+
+                if (!response.isSuccessful()) {
+                    throw new IOException("Speech recognition poll failed: " + response.code());
+                }
+
+                JsonNode root = objectMapper.readTree(responseBody);
+                JsonNode output = root.get("output");
+                if (output != null) {
+                    String status = output.has("task_status") ? output.get("task_status").asText() : "";
+                    if ("SUCCEEDED".equals(status)) {
+                        return extractRecognizedText(responseBody);
+                    } else if ("FAILED".equals(status)) {
+                        String msg = output.has("message") ? output.get("message").asText() : "unknown";
+                        throw new IOException("ASR task failed: " + msg);
+                    }
+                    // PENDING 或 RUNNING，继续轮询
+                }
+            }
+        }
+
+        throw new IOException("ASR task timed out after 30s");
     }
 
     /**
