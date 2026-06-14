@@ -75,25 +75,33 @@ public class GeminiAIService {
     /**
      * 发送图像 + 文字 (多模态)
      */
-    public String chatWithImage(ConversationSession session, String userMessage, byte[] imageData) {
+    public String chatWithImage(ConversationSession session, String userMessage, byte[] imageData) throws IOException {
         session.addMessage(ChatMessage.userText(userMessage + " [附带摄像头画面]"));
 
-        try {
-            String requestBody = buildMultimodalRequest(session, userMessage, imageData);
-            String response = callQwenVLApi(requestBody);
-            session.addMessage(ChatMessage.assistantText(response));
-            return response;
-        } catch (Exception e) {
-            log.error("Qwen multimodal API call failed", e);
-            return "抱歉，图像分析服务暂时不可用。错误: " + e.getMessage();
-        }
+        String requestBody = buildMultimodalRequest(session, userMessage, imageData);
+        String response = callQwenVLApi(requestBody);
+        session.addMessage(ChatMessage.assistantText(response));
+        return response;
     }
 
     /**
      * 分析图像 (纯画面描述)
+     * 先尝试 VL 多模态模型，失败则降级到纯文本模型 + 截图反馈
      */
     public String analyzeImage(ConversationSession session, byte[] imageData) {
-        return chatWithImage(session, "请简要描述你在这张图像中看到的内容。", imageData);
+        try {
+            return chatWithImage(session, "请简要描述你在这张图像中看到的内容。", imageData);
+        } catch (Exception vlError) {
+            log.warn("VL API failed (likely API key lacks multimodal access), falling back to text: {}", vlError.getMessage());
+            // 降级：用纯文本模型给用户反馈
+            String fallback = "📷 已捕获摄像头画面（" + (imageData.length / 1024) + "KB JPEG）。\n"
+                    + "⚠️ 当前 API Key 不支持图像分析，但你可以打字和我聊天！\n"
+                    + "💡 提示：去 [DashScope 控制台](https://dashscope.console.aliyun.com/apiKey) "
+                    + "确认已开通 qwen-vl-plus 等多模态模型。";
+            session.addMessage(ChatMessage.userText("[摄像头画面]"));
+            session.addMessage(ChatMessage.assistantText(fallback));
+            return fallback;
+        }
     }
 
     /**
