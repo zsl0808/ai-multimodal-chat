@@ -145,13 +145,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ---- Microphone Control ----
-    btnToggleMic.addEventListener('click', () => {
+    btnToggleMic.addEventListener('click', async () => {
         if (!speechInitialized) {
             addSystemMessage('⚠️ 您的浏览器不支持语音识别功能，请使用 Chrome 浏览器。');
             return;
         }
 
-        micActive = Speech.toggleListening();
+        micActive = await Speech.toggleListening();
         updateMicUI();
     });
 

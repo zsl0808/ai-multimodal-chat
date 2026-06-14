@@ -80,7 +80,7 @@ public class GeminiAIService {
 
         try {
             String requestBody = buildMultimodalRequest(session, userMessage, imageData);
-            String response = callQwenApi(requestBody);
+            String response = callQwenVLApi(requestBody);
             session.addMessage(ChatMessage.assistantText(response));
             return response;
         } catch (Exception e) {
@@ -97,15 +97,18 @@ public class GeminiAIService {
     }
 
     /**
-     * 构建纯文字请求体 (OpenAI 兼容格式)
+     * 构建纯文字请求体 (DashScope 原生格式)
      */
     private String buildTextRequest(ConversationSession session) {
         try {
             ObjectNode root = objectMapper.createObjectNode();
-            root.put("model", appConfig.getQwenModel());
+            root.put("model", "qwen-turbo");
+
+            // Input
+            ObjectNode input = root.putObject("input");
 
             // Messages
-            ArrayNode messages = root.putArray("messages");
+            ArrayNode messages = input.putArray("messages");
 
             // System message
             ObjectNode sysMsg = messages.addObject();
@@ -120,8 +123,10 @@ public class GeminiAIService {
                 chatMsg.put("content", msg.getContent());
             }
 
-            root.put("max_tokens", appConfig.getMaxOutputTokens());
-            root.put("temperature", appConfig.getTemperature());
+            // Parameters
+            ObjectNode parameters = root.putObject("parameters");
+            parameters.put("max_tokens", appConfig.getMaxOutputTokens());
+            parameters.put("temperature", appConfig.getTemperature());
 
             return objectMapper.writeValueAsString(root);
         } catch (Exception e) {
@@ -130,14 +135,18 @@ public class GeminiAIService {
     }
 
     /**
-     * 构建多模态请求体 (图像 + 文字)
+     * 构建多模态请求体 (图像 + 文字) - DashScope 原生格式
      */
     private String buildMultimodalRequest(ConversationSession session, String userMessage, byte[] imageData) {
         try {
             ObjectNode root = objectMapper.createObjectNode();
-            root.put("model", appConfig.getQwenModel());
+            root.put("model", "qwen-vl-max");
 
-            ArrayNode messages = root.putArray("messages");
+            // Input
+            ObjectNode input = root.putObject("input");
+
+            // Messages
+            ArrayNode messages = input.putArray("messages");
 
             // System message
             ObjectNode sysMsg = messages.addObject();
@@ -155,24 +164,23 @@ public class GeminiAIService {
                 chatMsg.put("content", msg.getContent());
             }
 
-            // Current user message with image (OpenAI multimodal format)
+            // Current user message with image (DashScope multimodal format)
             ObjectNode userMsg = messages.addObject();
             userMsg.put("role", "user");
             ArrayNode contentArray = userMsg.putArray("content");
 
             // Text part
             ObjectNode textPart = contentArray.addObject();
-            textPart.put("type", "text");
             textPart.put("text", userMessage);
 
             // Image part (base64)
             ObjectNode imagePart = contentArray.addObject();
-            imagePart.put("type", "image_url");
-            ObjectNode imageUrl = imagePart.putObject("image_url");
-            imageUrl.put("url", "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(imageData));
+            imagePart.put("image", "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(imageData));
 
-            root.put("max_tokens", appConfig.getMaxOutputTokens());
-            root.put("temperature", appConfig.getTemperature());
+            // Parameters
+            ObjectNode parameters = root.putObject("parameters");
+            parameters.put("max_tokens", appConfig.getMaxOutputTokens());
+            parameters.put("temperature", appConfig.getTemperature());
 
             return objectMapper.writeValueAsString(root);
         } catch (Exception e) {
@@ -181,10 +189,10 @@ public class GeminiAIService {
     }
 
     /**
-     * 调用通义千问 API (OpenAI 兼容模式)
+     * 调用通义千问 API (DashScope 原生格式)
      */
     private String callQwenApi(String requestBody) throws IOException {
-        String url = appConfig.getQwenBaseUrl() + "/chat/completions";
+        String url = appConfig.getQwenBaseUrl() + "/services/aigc/text-generation/generation";
 
         Request request = new Request.Builder()
                 .url(url)
@@ -208,18 +216,71 @@ public class GeminiAIService {
     }
 
     /**
-     * 从 OpenAI 兼容响应中提取文本
+     * 调用通义千问 VL API (图像分析)
+     */
+    private String callQwenVLApi(String requestBody) throws IOException {
+        String url = appConfig.getQwenBaseUrl() + "/services/aigc/multimodal-generation/generation";
+
+        Request request = new Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer " + appConfig.getQwenApiKey())
+                .addHeader("Content-Type", "application/json")
+                .post(RequestBody.create(requestBody, MediaType.parse("application/json")))
+                .build();
+
+        log.debug("Calling Qwen VL API: {}", url);
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = response.body() != null ? response.body().string() : "";
+
+            if (!response.isSuccessful()) {
+                log.error("Qwen VL API error: {} - {}", response.code(), body);
+                throw new IOException("Qwen VL API returned " + response.code() + ": " + body);
+            }
+
+            return extractResponseText(body);
+        }
+    }
+
+    /**
+     * 从 DashScope 原生响应中提取文本
+     * 支持两种格式:
+     *   1. 纯文本生成: output.text
+     *   2. 多模态生成:  output.choices[0].message.content[0].text
      */
     private String extractResponseText(String responseBody) throws IOException {
         JsonNode root = objectMapper.readTree(responseBody);
 
-        JsonNode choices = root.get("choices");
-        if (choices != null && choices.isArray() && !choices.isEmpty()) {
-            JsonNode message = choices.get(0).get("message");
-            if (message != null) {
-                JsonNode content = message.get("content");
-                if (content != null) {
-                    return content.asText();
+        JsonNode output = root.get("output");
+        if (output != null) {
+            // 格式 1: 纯文本生成 API — output.text
+            JsonNode text = output.get("text");
+            if (text != null) {
+                return text.asText();
+            }
+
+            // 格式 2: 多模态生成 API — output.choices[0].message.content[0].text
+            JsonNode choices = output.get("choices");
+            if (choices != null && choices.isArray() && !choices.isEmpty()) {
+                JsonNode firstChoice = choices.get(0);
+                JsonNode message = firstChoice.get("message");
+                if (message != null) {
+                    // content 可能是字符串或数组
+                    JsonNode content = message.get("content");
+                    if (content != null) {
+                        if (content.isTextual()) {
+                            return content.asText();
+                        }
+                        if (content.isArray() && !content.isEmpty()) {
+                            // 取第一个 text 元素
+                            for (JsonNode part : content) {
+                                JsonNode partText = part.get("text");
+                                if (partText != null) {
+                                    return partText.asText();
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

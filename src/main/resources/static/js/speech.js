@@ -1,14 +1,17 @@
 /**
  * 语音模块
- * 使用 Web Speech API 实现语音识别和语音合成
+ * 使用浏览器 MediaRecorder 录制 + 后端语音识别
  *
- * 成本控制: Web Speech API 完全免费，由浏览器内置引擎提供
+ * 优势: 在任何网络环境下都能工作，不依赖 Google 服务
  */
 const Speech = (() => {
-    let recognition = null;
+    let mediaRecorder = null;
+    let audioChunks = [];
     let synthesis = window.speechSynthesis;
     let isListening = false;
     let isSpeaking = false;
+    let shouldContinueListening = false;  // 持续监听意图标记
+    let recordingTimer = null;
 
     // 回调函数
     let onResult = null;
@@ -21,7 +24,7 @@ const Speech = (() => {
      * 检查浏览器支持
      */
     function isSupported() {
-        return 'SpeechRecognition' in window || 'webkitSpeechRecognition' in window;
+        return navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
     }
 
     /**
@@ -29,7 +32,7 @@ const Speech = (() => {
      */
     function init(callbacks = {}) {
         if (!isSupported()) {
-            console.warn('[Speech] Web Speech API not supported in this browser');
+            console.warn('[Speech] MediaRecorder not supported in this browser');
             return false;
         }
 
@@ -39,84 +42,122 @@ const Speech = (() => {
         onEnd = callbacks.onEnd || (() => {});
         onError = callbacks.onError || (() => {});
 
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        recognition = new SpeechRecognition();
-
-        // 配置
-        recognition.lang = 'zh-CN';         // 中文
-        recognition.continuous = true;       // 持续识别
-        recognition.interimResults = true;   // 显示中间结果
-        recognition.maxAlternatives = 1;
-
-        // 事件处理
-        recognition.onstart = () => {
-            isListening = true;
-            console.log('[Speech] Recognition started');
-            onStart();
-        };
-
-        recognition.onresult = (event) => {
-            let interimTranscript = '';
-            let finalTranscript = '';
-
-            for (let i = event.resultIndex; i < event.results.length; i++) {
-                const transcript = event.results[i][0].transcript;
-                if (event.results[i].isFinal) {
-                    finalTranscript += transcript;
-                } else {
-                    interimTranscript += transcript;
-                }
-            }
-
-            if (interimTranscript) {
-                onInterim(interimTranscript);
-            }
-
-            if (finalTranscript) {
-                console.log('[Speech] Final result:', finalTranscript);
-                onResult(finalTranscript.trim());
-            }
-        };
-
-        recognition.onerror = (event) => {
-            console.error('[Speech] Error:', event.error);
-            isListening = false;
-
-            // 不中断: 'no-speech' 和 'aborted' 是正常情况
-            if (event.error !== 'no-speech' && event.error !== 'aborted') {
-                onError(event.error);
-            }
-        };
-
-        recognition.onend = () => {
-            isListening = false;
-            console.log('[Speech] Recognition ended');
-            onEnd();
-        };
-
         return true;
     }
 
     /**
      * 开始语音识别
      */
-    function startListening() {
-        if (!recognition) {
-            console.error('[Speech] Not initialized');
-            return false;
-        }
-
+    async function startListening() {
         if (isListening) {
             console.warn('[Speech] Already listening');
             return true;
         }
 
         try {
-            recognition.start();
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+            mediaRecorder = new MediaRecorder(stream, {
+                mimeType: 'audio/webm;codecs=opus'
+            });
+
+            audioChunks = [];
+            shouldContinueListening = true;
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    audioChunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                stream.getTracks().forEach(track => track.stop());
+
+                if (audioBlob.size > 100) {
+                    await sendAudioForRecognition(audioBlob);
+                }
+
+                isListening = false;
+                onEnd();
+
+                // 如果用户没有主动停止，自动重启录音（实现持续识别）
+                if (shouldContinueListening) {
+                    setTimeout(() => {
+                        if (shouldContinueListening) {
+                            startListening();
+                        }
+                    }, 100);
+                }
+            };
+
+            mediaRecorder.onerror = (event) => {
+                console.error('[Speech] MediaRecorder error:', event.error);
+                isListening = false;
+                shouldContinueListening = false;
+                onError(event.error);
+            };
+
+            mediaRecorder.start(1000);
+            isListening = true;
+            onStart();
+            showInterimStatus();
+
+            // 3秒后自动停止当前录音段，触发 onstop 后会自动重启
+            recordingTimer = setTimeout(() => {
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    mediaRecorder.stop();
+                }
+            }, 3000);
+
             return true;
         } catch (e) {
             console.error('[Speech] Failed to start:', e);
+            shouldContinueListening = false;
+            onError(e.message);
             return false;
+        }
+    }
+
+    /**
+     * 显示录音中间状态
+     */
+    function showInterimStatus() {
+        if (isListening) {
+            onInterim('🎤 正在录音...');
+            setTimeout(() => {
+                if (isListening) {
+                    showInterimStatus();
+                }
+            }, 1000);
+        }
+    }
+
+    /**
+     * 发送音频到后端进行识别
+     */
+    async function sendAudioForRecognition(audioBlob) {
+        try {
+            const formData = new FormData();
+            formData.append('audio', audioBlob, 'recording.webm');
+
+            const response = await fetch('/api/speech/recognize', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                throw new Error('Recognition request failed: ' + response.status);
+            }
+
+            const result = await response.json();
+
+            if (result.text && result.text.trim()) {
+                onResult(result.text.trim());
+            }
+        } catch (e) {
+            console.error('[Speech] Recognition error:', e);
+            // 不中断，继续录音
         }
     }
 
@@ -124,27 +165,35 @@ const Speech = (() => {
      * 停止语音识别
      */
     function stopListening() {
-        if (recognition && isListening) {
-            recognition.stop();
+        shouldContinueListening = false;  // 标记为主动停止，onstop 中不再重启
+
+        if (recordingTimer) {
+            clearTimeout(recordingTimer);
+            recordingTimer = null;
         }
+
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+        }
+
+        isListening = false;
     }
 
     /**
      * 切换语音识别状态
      */
-    function toggleListening() {
+    async function toggleListening() {
         if (isListening) {
             stopListening();
             return false;
         } else {
-            startListening();
-            return true;
+            const success = await startListening();
+            return success;
         }
     }
 
     /**
      * 语音合成 (TTS) - 让 AI 说话
-     * 成本控制: 浏览器内置 TTS，完全免费
      */
     function speak(text) {
         if (!synthesis) {
@@ -152,16 +201,14 @@ const Speech = (() => {
             return;
         }
 
-        // 取消当前正在播放的语音
         synthesis.cancel();
 
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.lang = 'zh-CN';
-        utterance.rate = 1.0;   // 语速
-        utterance.pitch = 1.0;  // 音调
-        utterance.volume = 1.0; // 音量
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
 
-        // 尝试选择中文语音
         const voices = synthesis.getVoices();
         const zhVoice = voices.find(v => v.lang.startsWith('zh'));
         if (zhVoice) {
