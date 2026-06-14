@@ -100,6 +100,9 @@ public class SpeechController {
 
             Map<String, String> response = new HashMap<>();
             response.put("text", recognizedText);
+            if (recognizedText.isEmpty()) {
+                response.put("debug", "ASR returned empty text - check server logs for raw response");
+            }
             return ResponseEntity.ok(response);
 
         } catch (Exception e) {
@@ -231,23 +234,78 @@ public class SpeechController {
     /**
      * 从 DashScope ASR 响应中提取识别的文本
      */
+    /**
+     * 从 DashScope ASR 响应中提取识别的文本
+     * 异步 API 返回 transcription_url，需要再请求获取实际文本
+     */
     private String extractRecognizedText(String responseBody) throws IOException {
         JsonNode root = objectMapper.readTree(responseBody);
 
-        // DashScope 语音识别响应格式: output.results[0].transcript
         JsonNode output = root.get("output");
         if (output != null) {
+            // 检查 task_status
+            if (output.has("task_status")) {
+                String status = output.get("task_status").asText();
+                if (!"SUCCEEDED".equals(status)) {
+                    throw new IOException("Task status: " + status);
+                }
+            }
+
             JsonNode results = output.get("results");
             if (results != null && results.isArray() && !results.isEmpty()) {
                 JsonNode firstResult = results.get(0);
+
+                // 直接转录文本（同步 API 格式）
                 JsonNode transcript = firstResult.get("transcript");
                 if (transcript != null) {
                     return transcript.asText();
                 }
+
+                // 异步 API：transcription_url 指向结果 JSON 文件
+                JsonNode transcriptionUrl = firstResult.get("transcription_url");
+                if (transcriptionUrl != null) {
+                    return fetchTranscriptionFromUrl(transcriptionUrl.asText());
+                }
+
+                throw new IOException("No transcript or transcription_url in result: " + responseBody);
             }
         }
 
         log.warn("Unexpected speech recognition response: {}", responseBody);
         return "";
+    }
+
+    /**
+     * 从 transcription_url 下载并提取识别文本
+     */
+    private String fetchTranscriptionFromUrl(String url) throws IOException {
+        log.info("Fetching transcription from: {}", url);
+        Request req = new Request.Builder().url(url).get().build();
+        try (Response resp = httpClient.newCall(req).execute()) {
+            String body = resp.body() != null ? resp.body().string() : "";
+            log.info("Transcription response [{}]: {}", resp.code(),
+                    body.length() > 300 ? body.substring(0, 300) + "..." : body);
+
+            if (!resp.isSuccessful()) {
+                throw new IOException("Failed to fetch transcription: " + resp.code());
+            }
+
+            // 递归提取（transcription JSON 结构中也可能有 transcript 字段）
+            JsonNode root = objectMapper.readTree(body);
+
+            // 尝试各种可能的结构
+            // 格式: {"transcripts": [{"text": "..."}]} 或 {"text": "..."} 或直接字符串
+            JsonNode transcripts = root.get("transcripts");
+            if (transcripts != null && transcripts.isArray() && !transcripts.isEmpty()) {
+                JsonNode text = transcripts.get(0).get("text");
+                if (text != null) return text.asText();
+            }
+            JsonNode text = root.get("text");
+            if (text != null) return text.asText();
+            if (root.isTextual()) return root.asText();
+
+            log.warn("Unknown transcription format: {}", body);
+            return "";
+        }
     }
 }

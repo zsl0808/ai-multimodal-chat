@@ -44,89 +44,14 @@ const Speech = (() => {
         onError = callbacks.onError || (() => {});
         onStateChange = callbacks.onStateChange || (() => {});
 
-        // 优先使用浏览器内置 SpeechRecognition
+        // 国内直接用 MediaRecorder + DashScope，跳过 Google SpeechRecognition
+        // （Google 语音服务被墙，每次 network error 体验不好）
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
-            recognition = new SpeechRecognition();
-            recognition.lang = 'zh-CN';
-            recognition.interimResults = true;
-            recognition.continuous = true;
-            recognition.maxAlternatives = 1;
-
-            recognition.onresult = (event) => {
-                let interim = '';
-                let final = '';
-                for (let i = event.resultIndex; i < event.results.length; i++) {
-                    const result = event.results[i];
-                    if (result.isFinal) {
-                        final += result[0].transcript;
-                    } else {
-                        interim += result[0].transcript;
-                    }
-                }
-                if (final) {
-                    console.log('[Speech] Final:', final);
-                    onResult(final);
-                }
-                if (interim) {
-                    console.log('[Speech] Interim:', interim);
-                    onInterim(interim);
-                }
-            };
-
-            recognition.onstart = () => {
-                console.log('[Speech] Browser recognition started');
-                isListening = true;
-                onStart();
-                onStateChange(true);
-            };
-
-            recognition.onend = () => {
-                console.log('[Speech] Browser recognition ended');
-                isListening = false;
-
-                // 自动重启（持续监听）- 不隐藏状态避免跳动
-                if (shouldContinueListening) {
-                    console.log('[Speech] Auto-restarting browser recognition...');
-                    setTimeout(() => {
-                        if (shouldContinueListening) {
-                            try { recognition.start(); } catch (e) { /* ignore */ }
-                        }
-                    }, 150);
-                } else {
-                    // 用户主动停止才隐藏状态
-                    onEnd();
-                    onStateChange(false);
-                }
-            };
-
-            recognition.onerror = (event) => {
-                console.error('[Speech] Browser recognition error:', event.error, event.message);
-                if (event.error === 'not-allowed') {
-                    isListening = false;
-                    shouldContinueListening = false;
-                    onStateChange(false);
-                    onError('not-allowed');
-                } else if (event.error === 'network' || event.error === 'service-not-allowed') {
-                    // Google 语音服务不可用（国内被墙），降级到 MediaRecorder
-                    console.warn('[Speech] Browser API unavailable, falling back to MediaRecorder');
-                    isListening = false;
-                    shouldContinueListening = false;
-                    browserAPIFailed = true;
-                    useBrowserAPI = false;
-                    onStateChange(false);
-                    // 自动用 MediaRecorder 重试
-                    setTimeout(() => startMediaRecorder(), 300);
-                }
-                // 其他错误（no-speech, aborted 等）自动在 onend 中处理
-            };
-
-            useBrowserAPI = true;
-            console.log('[Speech] Using browser SpeechRecognition API');
-            return true;
+            console.log('[Speech] Browser SpeechRecognition available but skipped (use MediaRecorder for reliability)');
         }
 
-        // 降级: 检查 MediaRecorder 支持
+        // 使用 MediaRecorder 录制 + 后端 DashScope ASR
         if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
             useBrowserAPI = false;
             console.log('[Speech] Browser SpeechRecognition not available, using MediaRecorder fallback');
@@ -291,15 +216,19 @@ const Speech = (() => {
     }
 
     /**
-     * 将 WebM/Opus 音频 Blob 转换为 WAV 格式（16kHz, 16-bit, mono）
-     * DashScope Paraformer 需要 WAV/PCM 格式
+     * 将 WebM/Opus 音频 Blob 转换为 WAV 格式（16-bit, mono）
+     * 不重采样，保留原始采样率；DashScope 会根据参数自动处理
      */
     async function convertToWav(webmBlob) {
         try {
-            const audioContext = new AudioContext({ sampleRate: 16000 });
+            // 解码原始音频
+            const audioContext = new AudioContext();
             const arrayBuffer = await webmBlob.arrayBuffer();
             const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-            console.log('[Speech] Decoded audio:', audioBuffer.sampleRate + 'Hz', audioBuffer.numberOfChannels + 'ch', audioBuffer.duration + 's');
+            const actualRate = audioBuffer.sampleRate;
+            console.log('[Speech] Decoded audio:', actualRate + 'Hz',
+                audioBuffer.numberOfChannels + 'ch', audioBuffer.duration.toFixed(1) + 's',
+                'max:', Math.max(...audioBuffer.getChannelData(0)).toFixed(3));
 
             // 取第一声道，转 Int16
             const channelData = audioBuffer.getChannelData(0);
@@ -311,38 +240,36 @@ const Speech = (() => {
 
             // 构建 WAV 文件
             const numChannels = 1;
-            const sampleRate = audioBuffer.sampleRate;
             const bitsPerSample = 16;
-            const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+            const byteRate = actualRate * numChannels * bitsPerSample / 8;
             const blockAlign = numChannels * bitsPerSample / 8;
             const dataSize = int16Data.length * 2;
 
             const buffer = new ArrayBuffer(44 + dataSize);
             const view = new DataView(buffer);
 
-            function writeStr(offset, str) {
-                for (let i = 0; i < str.length; i++) {
-                    view.setUint8(offset + i, str.charCodeAt(i));
-                }
+            function wstr(off, str) {
+                for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i));
             }
 
-            writeStr(0, 'RIFF');
+            wstr(0, 'RIFF');
             view.setUint32(4, 36 + dataSize, true);
-            writeStr(8, 'WAVE');
-            writeStr(12, 'fmt ');
+            wstr(8, 'WAVE');
+            wstr(12, 'fmt ');
             view.setUint32(16, 16, true);
             view.setUint16(20, 1, true);        // PCM
             view.setUint16(22, numChannels, true);
-            view.setUint32(24, sampleRate, true);
+            view.setUint32(24, actualRate, true);
             view.setUint32(28, byteRate, true);
             view.setUint16(32, blockAlign, true);
             view.setUint16(34, bitsPerSample, true);
-            writeStr(36, 'data');
+            wstr(36, 'data');
             view.setUint32(40, dataSize, true);
 
             new Uint8Array(buffer, 44).set(new Uint8Array(int16Data.buffer));
-
             audioContext.close();
+
+            console.log('[Speech] WAV created:', actualRate + 'Hz,', dataSize, 'bytes PCM');
             return new Blob([buffer], { type: 'audio/wav' });
         } catch (e) {
             console.error('[Speech] Failed to convert audio:', e);
@@ -377,13 +304,15 @@ const Speech = (() => {
             }
 
             const result = await response.json();
+            console.log('[Speech] Backend response:', JSON.stringify(result));
 
             if (result.text && result.text.trim()) {
                 console.log('[Speech] Recognized:', result.text);
                 onResult(result.text.trim());
-            }
-            if (result.error) {
+            } else if (result.error) {
                 console.warn('[Speech] Backend recognition error:', result.error);
+            } else {
+                console.warn('[Speech] Backend returned empty text, no error');
             }
         } catch (e) {
             console.error('[Speech] Recognition error:', e);
