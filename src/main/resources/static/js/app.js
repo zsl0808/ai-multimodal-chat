@@ -36,7 +36,7 @@ document.addEventListener('DOMContentLoaded', () => {
             hideVoiceStatus();
         },
         onInterim: (text) => {
-            showVoiceStatus('🎤 ' + text);
+            showVoiceStatus(text);
         },
         onStart: () => {
             showVoiceStatus('正在聆听...');
@@ -46,9 +46,15 @@ document.addEventListener('DOMContentLoaded', () => {
         },
         onError: (error) => {
             hideVoiceStatus();
-            if (error === 'not-allowed') {
+            if (error && (error === 'not-allowed' || error.includes('denied') || error.includes('permission'))) {
                 addSystemMessage('⚠️ 麦克风权限被拒绝，请在浏览器设置中允许麦克风访问。');
+            } else if (error) {
+                console.warn('[App] Speech error:', error);
             }
+        },
+        onStateChange: (active) => {
+            micActive = active;
+            updateMicUI();
         }
     });
 
